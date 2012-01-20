@@ -20,9 +20,7 @@ Example queries:
 
     http://localhost:8080/query?return_fields=user_id&user_id=admin
 
-    http://localhost:8080/query?return_fields=subject_id,gender,experiment_id,age&age=30&gender=f
-
-Age can also take "<" and ">" for comparisons, but your browser may not like it.
+    http://localhost:8080/query?return_fields=subject_id,gender,experiment_id,age&age<30&gender=f
 
 Return types can be requested using the Accept HTTP header.  Supported types are:
 
@@ -30,6 +28,6 @@ Return types can be requested using the Accept HTTP header.  Supported types are
     text/csv
     application/json (if simplejson is installed)
 
-A command line tool like curl can make it easier to expose all functionality:
+A command line tool like curl can make it easier to expose this functionality:
 
-    curl -H 'Accept: text/csv' 'http://localhost:8080/query?return_fields=subject_id,gender,experiment_id,age&age>30&gender=f'
+    curl -H 'Accept: text/csv' 'http://localhost:8080/query?return_fields=subject_id,gender,experiment_id,age&age<30&gender=f'

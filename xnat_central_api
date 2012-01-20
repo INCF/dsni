@@ -9,6 +9,7 @@ print 'setting up server...'
 import sys
 import wsgiref.simple_server
 import traceback
+import urllib
 import urllib2
 import xml.dom.minidom
 import csv
@@ -428,7 +429,8 @@ class QueryHandler(BaseHandler):
     def parse_query(self):
         self.return_fields = None
         self.constraints = []
-        for query_part in self.environ['QUERY_STRING'].split('&'):
+        query = urllib.unquote(self.environ['QUERY_STRING'])
+        for query_part in query.split('&'):
             if query_part.startswith('return_fields='):
                 self.return_fields = query_part[14:].split(',')
             elif '=' in query_part:
