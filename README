@@ -1,1 +1,35 @@
 Repository for Neuroimaging Datasharing Task Force
+
+contents:
+
+    xnat_central_adapter -- initial API specification adapter for XNAT Central
+
+Run xnat_central_adapter to have the initial (January 20, 2012) API running locally on port 8080 for XNAT Central data.
+
+Example queries:
+
+    http://localhost:8080/restservices
+
+    http://localhost:8080/fields
+
+    http://localhost:8080/query?return_fields=user_id
+
+    http://localhost:8080/query?return_fields=subject_id,gender,experiment_id,age
+
+    http://localhost:8080/query?return_fields=subject_id,user_id
+
+    http://localhost:8080/query?return_fields=user_id&user_id=admin
+
+    http://localhost:8080/query?return_fields=subject_id,gender,experiment_id,age&age=30&gender=f
+
+Age can also take "<" and ">" for comparisons, but your browser may not like it.
+
+Return types can be requested using the Accept HTTP header.  Supported types are:
+
+    application/xml (default)
+    text/csv
+    application/json (if simplejson is installed)
+
+A command line tool like curl can make it easier to expose all functionality:
+
+    curl -H 'Accept: text/csv' 'http://localhost:8080/query?return_fields=subject_id,gender,experiment_id,age&age>30&gender=f'

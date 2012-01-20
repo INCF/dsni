@@ -1,0 +1,521 @@
+#!/usr/bin/python
+
+# basic INCF neuroimaging datasharing API for XNAT Central
+# January, 2012
+# Christian Haselgrove christian.haselgrove@umassmed.edu
+
+print 'setting up server...'
+
+import sys
+import wsgiref.simple_server
+import traceback
+import urllib2
+import xml.dom.minidom
+import csv
+import StringIO
+try:
+    import simplejson
+except ImportError:
+    simplejson = None
+
+subject_query = """<?xml version="1.0" encoding="UTF-8"?>
+<xdat:search xmlns:xdat="http://nrg.wustl.edu/security" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <xdat:root_element_name>xnat:subjectData</xdat:root_element_name>
+    <xdat:search_field>
+        <xdat:element_name>xnat:subjectData</xdat:element_name>
+        <xdat:field_ID>LABEL</xdat:field_ID>
+        <xdat:sequence>0</xdat:sequence>
+        <xdat:type>string</xdat:type>
+        <xdat:header>subject_id</xdat:header>
+    </xdat:search_field>
+    <xdat:search_field>
+        <xdat:element_name>xnat:subjectData</xdat:element_name>
+        <xdat:field_ID>GENDER</xdat:field_ID>
+        <xdat:sequence>1</xdat:sequence>
+        <xdat:type>string</xdat:type>
+        <xdat:header>gender</xdat:header>
+    </xdat:search_field>
+</xdat:search>
+"""
+
+experiment_query = """<?xml version="1.0" encoding="UTF-8"?>
+<xdat:search xmlns:xdat="http://nrg.wustl.edu/security" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <xdat:root_element_name>xnat:mrSessionData</xdat:root_element_name>
+    <xdat:search_field>
+        <xdat:element_name>xnat:mrSessionData</xdat:element_name>
+        <xdat:field_ID>LABEL</xdat:field_ID>
+        <xdat:sequence>0</xdat:sequence>
+        <xdat:type>string</xdat:type>
+        <xdat:header>experiment_id</xdat:header>
+    </xdat:search_field>
+    <xdat:search_field>
+        <xdat:element_name>xnat:subjectData</xdat:element_name>
+        <xdat:field_ID>SUBJECT_ID</xdat:field_ID>
+        <xdat:sequence>1</xdat:sequence>
+        <xdat:type>string</xdat:type>
+        <xdat:header>subject_id</xdat:header>
+    </xdat:search_field>
+    <xdat:search_field>
+        <xdat:element_name>xnat:mrSessionData</xdat:element_name>
+        <xdat:field_ID>AGE</xdat:field_ID>
+        <xdat:sequence>2</xdat:sequence>
+        <xdat:type>integer</xdat:type>
+        <xdat:header>age</xdat:header>
+    </xdat:search_field>
+</xdat:search>
+"""
+
+restservices = [{'url': '/restservices', 
+                 'description': 'get available services', 
+                 'methods': ['GET'], 
+                 'parameters': []}, 
+                {'url': '/fields', 
+                 'description': 'get database fields', 
+                 'methods': ['GET'], 
+                 'parameters': []}, 
+                {'url': '/query', 
+                 'description': 'query the database', 
+                 'methods': ['GET'], 
+                 'parameters': ['return_keys']}]
+
+fields = [{'name': 'user_id', 
+           'term': None, 
+           'description': 'XNAT user ID', 
+           'datatype': 'string', 
+           'searchable': True, 
+           'tables': ['user']}, 
+          {'name': 'subject_id', 
+           'term': None, 
+           'description': 'Subject ID', 
+           'datatype': 'string', 
+           'searchable': True, 
+           'tables': ['subject', 'experiment']}, 
+          {'name': 'age', 
+           'term': None, 
+           'description': 'Age of the subject, in years', 
+           'datatype': 'int', 
+           'searchable': True, 
+           'tables': ['subject', 'experiment']}, 
+          {'name': 'gender', 
+           'term': None, 
+           'description': 'Gender of the subject (m/f/u)', 
+           'datatype': 'string', 
+           'searchable': True, 
+           'tables': ['subject', 'experiment']}, 
+          {'name': 'experiment_id', 
+           'term': None, 
+           'description': 'Experiment ID', 
+           'datatype': 'string', 
+           'searchable': False, 
+           'tables': ['subject', 'experiment']}]
+
+def create_text_element(doc, tag, text):
+    element = doc.createElement(tag)
+    element.appendChild(doc.createTextNode(text))
+    return element
+
+def list_of_dicts_to_xml(data, root_name, element_name):
+    doc = xml.dom.minidom.Document()
+    root = doc.createElement(root_name)
+    doc.appendChild(root)
+    for d in data:
+        node = doc.createElement(element_name)
+        for (key, value) in d.iteritems():
+            if value is None:
+                continue
+            if isinstance(value, list):
+                if not value:
+                    child = doc.createElement(key)
+                else:
+                    value = ','.join(value)
+                    child = create_text_element(doc, key, value)
+            elif isinstance(value, bool):
+                if value:
+                    child = create_text_element(doc, key, 'true')
+                else:
+                    child = create_text_element(doc, key, 'false')
+            elif isinstance(value, int):
+                child = create_text_element(doc, key, str(value))
+            else:
+                child = create_text_element(doc, key, value)
+            node.appendChild(child)
+        root.appendChild(node)
+    return doc
+
+def list_of_dicts_to_csv(data):
+    s = StringIO.StringIO()
+    keys = data[0].keys()
+    w = csv.writer(s)
+    w.writerow(keys)
+    for d in data:
+        row = []
+        for key in keys:
+            value = d[key]
+            if value is None:
+                row.append('')
+            elif isinstance(value, list):
+                row.append(','.join(value))
+            elif isinstance(value, bool):
+                if value:
+                    row.append('true')
+                else:
+                    row.append('false')
+            else:
+                row.append(value)
+        w.writerow(row)
+    return s.getvalue()
+
+class HandlerError:
+
+    def __init__(self, status, content_type, output):
+        self.status = status
+        self.content_type = content_type
+        self.output = output
+        return
+
+class MethodNotAllowedError(HandlerError):
+
+    def __init__(self, environ):
+        msg = '%s not allowed on %s\n' % (environ['REQUEST_METHOD'], 
+                                          environ['PATH_INFO'])
+        HandlerError.__init__(self, '405 Method Not Allowed', 'text/plain', msg)
+        return
+
+class BadRequestError(HandlerError):
+
+    def __init__(self, output):
+        HandlerError.__init__(self, '400 Bad Request', 'text/plain', output)
+        return
+
+def application(environ, start_response):
+    try:
+        if environ['PATH_INFO'] == '/restservices':
+            handler = RestservicesHandler(environ)
+        elif environ['PATH_INFO'] == '/fields':
+            handler = FieldsHandler(environ)
+        elif environ['PATH_INFO'] == '/query':
+            handler = QueryHandler(environ)
+        else:
+            raise HandlerError('404 Not Found', 'text/plain', 'URL not found')
+        (status, content_type, output) = handler.run()
+    except HandlerError, exc:
+        status = exc.status
+        content_type = exc.content_type
+        output = exc.output
+        c_type = 'text/plain'
+    except:
+        status = '500 Internal Server Error'
+        output = traceback.format_exc()
+        content_type = 'text/plain'
+    if not output.endswith('\n'):
+        output += '\n'
+    response_headers = [('Content-Type', content_type), 
+                        ('Content-Length', str(len(output)))]    
+    start_response(status, response_headers)
+    return [output]
+
+class BaseHandler:
+
+    """base class for handlers"""
+
+    def __init__(self, environ):
+        self.environ = environ
+        if 'HTTP_ACCEPT' in self.environ:
+            self.return_type = None
+            for type in self.environ['HTTP_ACCEPT'].split(','):
+                type = type.strip().split(';')[0]
+                if type == '*/*':
+                    self.return_type = 'application/xml'
+                    break
+                if type in ('application/xml', 'application/json', 'text/csv'):
+                    self.return_type = type
+                    break
+            if not self.return_type:
+                msg = 'no matching return types'
+                raise BadRequestError(msg)
+        else:
+            self.return_type = 'application/xml'
+        if self.return_type == 'application/json' and simplejson is None:
+            raise HandlerError('501 Not Implemented', 
+                               'text/plain', 
+                               'JSON unsupported')
+        return
+
+    def run(self):
+        raise HandlerError('501 Not Implemented', 
+                           'text/plain', 
+                           'not yet implemented')
+
+    def formatted_return(self):
+        if self.return_type == 'application/json':
+            return ('200 OK', 'application/json', self.json_output())
+        elif self.return_type == 'text/csv':
+            return ('200 OK', 'text/csv', self.csv_output())
+        return ('200 OK', 'application/xml', self.xml_output())
+
+class RestservicesHandler(BaseHandler):
+
+    def run(self):
+        if self.environ['REQUEST_METHOD'] != 'GET':
+            raise MethodNotAllowedError(self.environ)
+        return self.formatted_return()
+
+    def json_output(self):
+        return simplejson.dumps(restservices)
+
+    def xml_output(self):
+        doc = list_of_dicts_to_xml(restservices, 'restservices', 'service')
+        return doc.toxml()
+
+    def csv_output(self):
+        return list_of_dicts_to_csv(restservices)
+
+class FieldsHandler(BaseHandler):
+
+    def run(self):
+        if self.environ['REQUEST_METHOD'] != 'GET':
+            raise MethodNotAllowedError(self.environ)
+        return self.formatted_return()
+
+    def json_output(self):
+        return simplejson.dumps(fields)
+
+    def xml_output(self):
+        doc = list_of_dicts_to_xml(fields, 'fields', 'field')
+        return doc.toxml()
+
+    def csv_output(self):
+        return list_of_dicts_to_csv(fields)
+
+class QueryHandler(BaseHandler):
+
+    def run(self):
+        if self.environ['REQUEST_METHOD'] != 'GET':
+            raise MethodNotAllowedError(self.environ)
+        self.parse_query()
+        self.check_return_fields()
+        if 'user_id' in self.return_fields:
+            self.user_search()
+        elif 'age' in self.return_fields:
+            self.experiment_search()
+        elif 'experiment_id' in self.return_fields:
+            self.experiment_search()
+        else:
+            self.subject_search()
+        self.filter_fields()
+        return self.formatted_return()
+
+    def user_search(self):
+        data = [ {'user_id': u['login']} for u in users ]
+        for (field, cmp, value) in self.constraints:
+            if field == 'user_id':
+                d2 = []
+                for row in data:
+                    if row['user_id'] == value:
+                        d2.append(row)
+                data = d2
+        self.data = data
+        return
+
+    def experiment_search(self):
+        data = []
+        for e in experiments:
+            subject_id = e['xnat_subjectdata_subject_id']
+            if subject_id not in subjects_dict:
+                continue
+            data.append({'subject_id': subject_id, 
+                         'age': e['age'], 
+                         'gender': subjects_dict[subject_id]['gender'],
+                         'experiment_id': e['session_id']})
+        for (field, cmp, value) in self.constraints:
+            if field == 'gender':
+                d2 = []
+                for row in data:
+                    if row['gender'] == value:
+                        d2.append(row)
+                data = d2
+            if field == 'subject_id':
+                d2 = []
+                for row in data:
+                    if row['subject_id'] == value:
+                        d2.append(row)
+                data = d2
+            if field == 'age':
+                d2 = []
+                for row in data:
+                    if cmp == '=':
+                        if row['age'] == value:
+                            d2.append(row)
+                    if cmp == '<':
+                        if row['age'] < value:
+                            d2.append(row)
+                    if cmp == '>':
+                        if row['age'] > value:
+                            d2.append(row)
+                data = d2
+        self.data = data
+        return
+
+    def subject_search(self):
+        data = []
+        for s in subjects:
+            data.append({'subject_id': s['xnat_col_subjectdatalabel'], 
+                         'gender': s['gender']})
+        for (field, cmp, value) in self.constraints:
+            if field == 'gender':
+                d2 = []
+                for row in data:
+                    if row['gender'] == value:
+                        d2.append(row)
+                data = d2
+            if field == 'subject_id':
+                d2 = []
+                for row in data:
+                    if row['subject_id'] == value:
+                        d2.append(row)
+                data = d2
+        self.data = data
+        return
+
+    def filter_fields(self):
+        data = []
+        for row in self.data:
+            new_row = {}
+            for key in row:
+                if key not in self.return_fields:
+                    continue
+                new_row[key] = row[key]
+            data.append(new_row)
+        self.data = data
+
+    def json_output(self):
+        return simplejson.dumps(self.data)
+
+    def xml_output(self):
+        doc = list_of_dicts_to_xml(self.data, 'search_results', 'record')
+        return doc.toxml()
+
+    def csv_output(self):
+        return list_of_dicts_to_csv(self.data)
+
+    def add_constraint(self, s, cmp):
+        ind = s.index(cmp)
+        field = s[:ind]
+        value = s[ind+1:]
+        if field == 'user_id':
+            if cmp != '=':
+                raise BadRequestError('must use "=" for user_id')
+        elif field == 'subject_id':
+            if cmp != '=':
+                raise BadRequestError('must use "=" for subject_id')
+        elif field == 'age':
+            try:
+                value = int(value)
+            except ValueError:
+                raise BadRequestError('bad age "%s"' % value)
+        elif field == 'gender':
+            if cmp != '=':
+                raise BadRequestError('must use "=" for gender')
+            if value not in ('m', 'f', 'u'):
+                raise BadRequestError('value must be "m", "f", or "u"')
+        elif field == 'experiment_id':
+            raise BadRequestError("can't search on experiment_id")
+        else:
+            raise BadRequestError('unknown field "%s"' % field)
+        self.constraints.append((field, cmp, value))
+        return
+
+    def parse_query(self):
+        self.return_fields = None
+        self.constraints = []
+        for query_part in self.environ['QUERY_STRING'].split('&'):
+            if query_part.startswith('return_fields='):
+                self.return_fields = query_part[14:].split(',')
+            elif '=' in query_part:
+                self.add_constraint(query_part, '=')
+            elif '<' in query_part:
+                self.add_constraint(query_part, '<')
+            elif '>' in query_part:
+                self.add_constraint(query_part, '>')
+            else:
+                raise BadRequestError('bad constraint "%s"' % query_part)
+
+    def check_return_fields(self):
+        if not self.return_fields:
+            raise BadRequestError('no return fields given')
+        tables_by_field = {}
+        for d in fields:
+            tables_by_field[d['name']] = d['tables']
+        table_counts = {}
+        for field in self.return_fields:
+            if field not in tables_by_field:
+                raise BadRequestError('unknown field "%s"' % field)
+            for table in tables_by_field[field]:
+                table_counts.setdefault(table, 0)
+                table_counts[table] += 1
+        table_matches = []
+        for table in table_counts:
+            if table_counts[table] == len(self.return_fields):
+                table_matches.append(table)
+        if not table_matches:
+            raise BadRequestError('disjoint return fields')
+        return
+
+uo = urllib2.urlopen('https://central.xnat.org/')
+xnat_cookie = uo.headers['Set-Cookie'][:43]
+uo.close()
+
+headers = {'Cookie': xnat_cookie}
+
+req = urllib2.Request('https://central.xnat.org/data/users?format=csv', 
+                      headers=headers)
+uo = urllib2.urlopen(req)
+users_reader = csv.reader(uo)
+csv_headers = users_reader.next()
+users = []
+for line in users_reader:
+    users.append(dict(zip(csv_headers, line)))
+uo.close()
+
+req = urllib2.Request('https://central.xnat.org/data/search?format=csv', 
+                      subject_query, 
+                      headers)
+uo = urllib2.urlopen(req)
+subjects_reader = csv.reader(uo)
+csv_headers = subjects_reader.next()
+subjects = []
+subjects_dict = {}
+for line in subjects_reader:
+    d = dict(zip(csv_headers, line))
+    d['gender'] = d['gender'].lower()
+    if d['gender'] in ('f', 'female'):
+        d['gender'] = 'f'
+    elif d['gender'] in ('m', 'male'):
+        d['gender'] = 'm'
+    else:
+        d['gender'] = 'u'
+    subjects.append(d)
+    subjects_dict[d['xnat_col_subjectdatalabel']] = d
+uo.close()
+
+req = urllib2.Request('https://central.xnat.org/data/search?format=csv', 
+                      experiment_query, 
+                      headers)
+uo = urllib2.urlopen(req)
+experiments_reader = csv.reader(uo)
+csv_headers = experiments_reader.next()
+experiments = []
+for line in experiments_reader:
+    d = dict(zip(csv_headers, line))
+    try:
+        d['age'] = int(d['age'])
+    except ValueError:
+        d['age'] = None
+    experiments.append(d)
+uo.close()
+
+httpd = wsgiref.simple_server.make_server('localhost', 8080, application)
+print 'ready to serve'
+httpd.serve_forever()
+
+# eof
